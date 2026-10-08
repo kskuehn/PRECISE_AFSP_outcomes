@@ -1,0 +1,31 @@
+age,sex_at_birth,gender_identity,race_ethnicity,hispanic_latino,education_years,current_student,employment,relationship
+20,Female,Man,Asian,No,12,Yes,Part-time employed,Member of an unmarried couple
+18,Female,Woman,White,No,9,Yes,Other,Single
+19,Female,Woman,More than one race,Yes,16,Yes,Unemployed,Member of an unmarried couple
+20,Female,Woman,More than one race,No,16,Yes,Other,Single
+21,Female,Woman,White,No,12,Yes,"Unemployed, volunteer work",Divorced or separated
+22,Female,Woman,White,Yes,18,Yes,"Unemployed, volunteer work",Member of an unmarried couple
+18,Female,Non-binary,Unknown/decline to respond,Yes,15,Yes,Part-time employed,Single
+18,Female,Man,Asian,Yes,15,Yes,"Unemployed, volunteer work",Single
+18,Female,Woman,Asian,No,15,Yes,Part-time employed,Member of an unmarried couple
+20,Female,Woman,More than one race,No,15,Yes,"Unemployed, volunteer work",Member of an unmarried couple
+22,Female,Woman,Asian,No,13,Yes,Full-time employed,Single
+26,Male,Woman,White,No,15,Yes,Other,Single
+21,Male,Woman,Asian,No,13,Yes,Unemployed,Single
+18,Male,Man,Asian,No,19,Yes,"Unemployed, volunteer work",Member of an unmarried couple
+21,Female,Woman,Asian,No,13,Yes,Unemployed,Single
+22,Female,Woman,More than one race,No,15,Yes,Other,Single
+22,Female,Woman,Asian,No,16,Yes,Unemployed,Single
+19,Male,Woman,White,Yes,16,Yes,Part-time employed,Single
+21,Female,Non-binary,Asian,No,16,No,Other,Single
+24,Female,Woman,Black or African American,No,15,Yes,Part-time employed,Single
+22,Male,Woman,White,No,15,Yes,Part-time employed,Single
+19,Male,Non-binary,Middle Eastern or North African,No,16,Yes,Other,Single
+20,Female,Woman,Unknown/decline to respond,No,15,Yes,Part-time employed,Single
+20,Female,Non-binary,More than one race,No,13,Yes,Part-time employed,Single
+25,Male,Man,White,Yes,15,Yes,Other,Single
+21,Female,Woman,Asian,No,15,Yes,"Unemployed, volunteer work",Single
+19,Female,Woman,Asian,Yes,12,Yes,Part-time employed,Single
+22,Female,Woman,Middle Eastern or North African,No,16,Yes,Part-time employed,Single
+26,Male,Woman,Asian,No,13,Yes,Part-time employed,Single
+25,Female,Man,White,No,12,Yes,Full-time employed,Single

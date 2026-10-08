@@ -1,0 +1,512 @@
+---
+title: "PRECISE open trial: analysis code"
+subtitle: "Preliminary Effects of PRECISE, a Personalized and Idiographically-Tailored Adjunctive Intervention, on Suicidal Ideation and Psychiatric Symptoms in Young Adults"
+author: "Kevin S. Kuehn, PhD"
+date: "Rendered `r format(Sys.Date(), '%B %d, %Y')`"
+output:
+  html_document:
+    toc: true
+    toc_depth: 2
+    toc_float: true
+    number_sections: false
+    df_print: kable
+---
+
+```{r setup, include = FALSE}
+knitr::opts_chunk$set(echo = TRUE, message = FALSE, warning = FALSE,
+                      fig.width = 8, fig.height = 4, dpi = 150)
+options(knitr.kable.NA = "", digits = 4)
+```
+
+This document contains the analysis code for the manuscript. All results are
+computed from the item-level, de-identified datasets in `data/`: scale scoring,
+descriptive tables, the Bayesian multilevel models, the responder analysis, and
+the EMA compliance, missingness and safety summaries.
+
+| Manuscript element | Data file |
+|---|---|
+| Table 1 (demographics) | `precise_demographics.csv` |
+| Table 2 (acceptability, feasibility, usability) | `precise_implementation.csv` |
+| EMA compliance, missingness models, EMA safety counts | `precise_ema.csv` |
+| Table 4 and Figure 2 (Bayesian multilevel models) | `precise_visits.csv` |
+| Table 5 (≥50% responders) | `precise_visits.csv` |
+
+Figure 1 (CONSORT), Table 3 (session attendance), treatment fidelity and the
+adverse-event log are summarized from study tracking records and are not
+computed here.
+
+The first knit compiles and samples seven Stan models (roughly 10 minutes);
+fitted models are cached in `fits/` so later knits take seconds. Delete `fits/`
+to refit from scratch.
+
+```{r packages}
+library(dplyr)
+library(tidyr)
+library(readr)
+library(ggplot2)
+library(brms)
+library(bayestestR)
+library(lme4)
+
+options(mc.cores = min(4, parallel::detectCores()))
+SEED <- 20260917
+dir.create("fits", showWarnings = FALSE)
+
+tp_levels <- c("baseline", "week6", "week12")
+tp_labels <- c("Baseline", "6 weeks", "12 weeks")
+```
+
+# Data
+
+```{r data}
+visits <- read_csv("data/precise_visits.csv", show_col_types = FALSE) %>%
+  mutate(timepoint = factor(timepoint, levels = tp_levels))
+implementation <- read_csv("data/precise_implementation.csv", show_col_types = FALSE)
+demographics   <- read_csv("data/precise_demographics.csv", show_col_types = FALSE)
+ema            <- read_csv("data/precise_ema.csv", show_col_types = FALSE)
+promis_par     <- read_csv("data/promis_item_parameters.csv", show_col_types = FALSE)
+
+visits %>% count(timepoint, name = "n participants") %>% knitr::kable()
+```
+
+# Scale scoring
+
+```{r scoring-helpers}
+# Sum score requiring a minimum proportion of answered items; missing items are
+# replaced by the person's mean of answered items (prorated sum).
+prorated_sum <- function(items, min_prop = 0.8) {
+  n_ok <- rowSums(!is.na(items))
+  out <- rowMeans(items, na.rm = TRUE) * ncol(items)
+  out[n_ok < ceiling(min_prop * ncol(items))] <- NA
+  out
+}
+
+# Expected a posteriori (EAP) theta under the graded response model with a
+# standard normal prior, using fixed (published) item parameters.
+#   resp: matrix of responses coded 1..5 (rows = people, columns = items)
+#   par:  data frame with one row per item: a, b1..b4
+grm_eap <- function(resp, par, nodes = seq(-6, 6, length.out = 241)) {
+  stopifnot(ncol(resp) == nrow(par))
+  prior <- dnorm(nodes)
+  b <- as.matrix(par[, c("b1", "b2", "b3", "b4")])
+  apply(resp, 1, function(r) {
+    answered <- which(!is.na(r))
+    if (!length(answered)) return(NA_real_)
+    lik <- prior
+    for (j in answered) {
+      # cumulative P(X >= k) for k = 1..6, i.e. 1, P*(b1), ..., P*(b4), 0
+      p_star <- cbind(1, plogis(par$a[j] * outer(nodes, b[j, ], "-")), 0)
+      lik <- lik * (p_star[, r[j]] - p_star[, r[j] + 1])
+    }
+    sum(nodes * lik) / sum(lik)
+  })
+}
+promis_t <- function(data, bank, min_items) {
+  par  <- promis_par %>% filter(.data$bank == .env$bank) %>% arrange(position)
+  resp <- as.matrix(data[, par$item_id])
+  t <- 50 + 10 * grm_eap(resp, par)
+  t[rowSums(!is.na(resp)) < min_items] <- NA   # < 80% of items answered
+  t
+}
+```
+
+```{r scoring}
+item <- function(prefix, k, width = 2) sprintf(paste0(prefix, "_%0", width, "d"), k)
+
+# CERQ: nine 4-item subscales (items k, k+9, k+18, k+27), items scored 1-5
+cerq_key <- list(
+  self_blame = c(1, 10, 19, 28), acceptance = c(2, 11, 20, 29),
+  rumination = c(3, 12, 21, 30), positive_refocusing = c(4, 13, 22, 31),
+  refocus_on_planning = c(5, 14, 23, 32), positive_reappraisal = c(6, 15, 24, 33),
+  putting_into_perspective = c(7, 16, 25, 34), catastrophizing = c(8, 17, 26, 35),
+  other_blame = c(9, 18, 27, 36))
+cerq_adaptive <- unlist(cerq_key[c("acceptance", "positive_refocusing", "refocus_on_planning",
+                                   "positive_reappraisal", "putting_into_perspective")])
+cerq_maladaptive <- unlist(cerq_key[c("self_blame", "rumination", "catastrophizing", "other_blame")])
+
+scores <- visits %>%
+  mutate(
+    # MSSI: items 5-18 are administered only after a positive screen on items
+    # 1-4, so unadministered items contribute 0 to the total (range 0-54).
+    # CSES: REDCap response options were coded 1-10, so totals range 26-260.
+    mssi = rowSums(across(all_of(item("mssi", 1:18))), na.rm = TRUE),
+    cerq_adaptive    = prorated_sum(across(all_of(item("cerq", cerq_adaptive)))),
+    cerq_maladaptive = prorated_sum(across(all_of(item("cerq", cerq_maladaptive)))),
+    cses             = prorated_sum(across(all_of(item("cses", 1:26)))),
+    promis_dep = promis_t(visits, "depression", min_items = 23),
+    promis_anx = promis_t(visits, "anxiety",    min_items = 24)
+  ) %>%
+  select(id, timepoint, cssrs, mssi, cerq_adaptive, cerq_maladaptive, cses, promis_dep, promis_anx)
+```
+
+Item-level missingness is minimal, so the 80% completion rules never exclude a
+visit:
+
+```{r missing-items}
+tibble(
+  measure = c("MSSI screening items (1-4)", "CERQ", "CSES", "PROMIS Depression", "PROMIS Anxiety"),
+  `missing item responses` = c(
+    sum(is.na(visits[, item("mssi", 1:4)])), sum(is.na(visits[, item("cerq", 1:36)])),
+    sum(is.na(visits[, item("cses", 1:26)])),
+    sum(is.na(visits[, grep("^EDDEP", names(visits))])),
+    sum(is.na(visits[, grep("^EDANX", names(visits))]))),
+  `visits scored` = c(sum(!is.na(scores$mssi)), sum(!is.na(scores$cerq_adaptive)),
+                      sum(!is.na(scores$cses)), sum(!is.na(scores$promis_dep)),
+                      sum(!is.na(scores$promis_anx)))
+) %>% knitr::kable()
+```
+
+Observed means (SD) by visit:
+
+```{r observed-means}
+outcomes <- tribble(
+  ~var,               ~label,
+  "cssrs",            "CSSRS",
+  "mssi",             "MSSI",
+  "cerq_adaptive",    "CERQ Adaptive (composite)",
+  "cerq_maladaptive", "CERQ Maladaptive (composite)",
+  "cses",             "CSES (coping self-efficacy)",
+  "promis_dep",       "PROMIS Depression (T-score)",
+  "promis_anx",       "PROMIS Anxiety (T-score)")
+
+scores_long <- scores %>%
+  pivot_longer(-c(id, timepoint), names_to = "var", values_to = "y") %>%
+  mutate(var = factor(var, levels = outcomes$var, labels = outcomes$label))
+
+scores_long %>%
+  group_by(Outcome = var, timepoint) %>%
+  summarise(n = sum(!is.na(y)),
+            `M (SD)` = sprintf("%.2f (%.2f)", mean(y, na.rm = TRUE), sd(y, na.rm = TRUE)),
+            .groups = "drop") %>%
+  pivot_wider(names_from = timepoint, values_from = c(n, `M (SD)`), names_vary = "slowest") %>%
+  knitr::kable()
+```
+
+# Table 1. Baseline demographic characteristics
+
+`precise_demographics.csv` is not linkable to the outcome files and each column
+was permuted independently before release, so marginal distributions (all that
+Table 1 reports) are exact but rows do not describe real individuals.
+
+```{r table1}
+cont_row <- function(x, label) {
+  tibble(Characteristic = label, n = NA_integer_,
+         `%` = sprintf("M (SD) = %.2f (%.2f); median (range) = %.1f (%d–%d)",
+                       mean(x), sd(x), median(x), min(x), max(x)))
+}
+cat_rows <- function(x, label) {
+  tab <- sort(table(x), decreasing = TRUE)
+  bind_rows(tibble(Characteristic = label, n = NA_integer_, `%` = ""),
+            tibble(Characteristic = paste0(" ", names(tab)), n = as.integer(tab),
+                   `%` = sprintf("%.1f%%", 100 * as.integer(tab) / length(x))))
+}
+bind_rows(
+  cont_row(demographics$age, "Age, years"),
+  cat_rows(demographics$sex_at_birth, "Sex assigned at birth"),
+  cat_rows(demographics$gender_identity, "Gender identity"),
+  cat_rows(demographics$race_ethnicity, "Race/Ethnicity"),
+  cat_rows(demographics$hispanic_latino, "Hispanic, Latino, Spanish, or Mexican origin"),
+  cont_row(demographics$education_years, "Education, years"),
+  cat_rows(demographics$current_student, "Current student"),
+  cat_rows(demographics$employment, "Employment status"),
+  cat_rows(demographics$relationship, "Relationship status")
+) %>% knitr::kable(caption = "Table 1. Baseline demographic characteristics (N = 30).")
+```
+
+# Table 2. Feasibility and acceptability
+
+```{r table2}
+sus_items <- as.matrix(implementation[, item("sus", 1:10)])
+odd <- seq(1, 9, 2); even <- seq(2, 10, 2)
+imp <- implementation %>%
+  transmute(id,
+            AIM = rowSums(across(aim_1:aim_4)),
+            IAM = rowSums(across(iam_1:iam_4)),
+            FIM = rowSums(across(fim_1:fim_4)),
+            SUS = 2.5 * (rowSums(sus_items[, odd] - 1) + rowSums(5 - sus_items[, even])))
+
+fmt_range <- function(x) sprintf("%s (%s–%s)", format(median(x), nsmall = 1),
+                                 format(min(x)), format(max(x)))
+tibble(
+  Measure = c("AIM — Acceptability", "IAM — Appropriateness", "FIM — Feasibility", "SUS — Usability"),
+  `Scale range` = c("4–20", "4–20", "4–20", "0–100"),
+  N = nrow(imp),
+  `Total M (SD)` = sapply(imp[-1], function(x) sprintf("%.2f (%.2f)", mean(x), sd(x))),
+  `Item-level M (SD)` = c(sapply(imp[c("AIM", "IAM", "FIM")],
+                                 function(x) sprintf("%.2f (%.2f)", mean(x / 4), sd(x / 4))), "—"),
+  `Median (range)` = sapply(imp[-1], fmt_range)
+) %>% knitr::kable(caption = "Table 2. Feasibility and acceptability of PRECISE at post-treatment.")
+```
+
+```{r table2-text}
+n_imp <- nrow(imp)
+pct <- function(k, n) sprintf("%d/%d (%.1f%%)", k, n, 100 * k / n)
+tibble(
+  Statistic = c("Below scale midpoint (12) on AIM, IAM or FIM",
+                "Maximum rating (20): AIM", "Maximum rating (20): IAM", "Maximum rating (20): FIM",
+                "SUS at or above 68 (above-average usability)",
+                "SUS at or above 85 (excellent)",
+                "Three lowest SUS scores"),
+  Value = c(pct(sum(imp$AIM < 12 | imp$IAM < 12 | imp$FIM < 12), n_imp),
+            pct(sum(imp$AIM == 20), n_imp), pct(sum(imp$IAM == 20), n_imp), pct(sum(imp$FIM == 20), n_imp),
+            pct(sum(imp$SUS >= 68), n_imp), pct(sum(imp$SUS >= 85), n_imp),
+            paste(sort(imp$SUS)[1:3], collapse = ", "))
+) %>% knitr::kable()
+
+round(cor(imp[-1]), 2) %>% knitr::kable(caption = "Pearson correlations among implementation measures.")
+```
+
+# EMA compliance and missingness
+
+`precise_ema.csv` has one row per scheduled prompt: 30 participants × 42 days ×
+5 prompts. `completed` is 1 when a completed survey was submitted for that
+prompt.
+
+```{r ema-compliance}
+by_person <- ema %>% group_by(ema_id) %>% summarise(rate = mean(completed), .groups = "drop")
+tibble(
+  `Scheduled prompts` = nrow(ema),
+  `Completed surveys` = sum(ema$completed),
+  `Overall compliance` = sprintf("%.1f%%", 100 * mean(ema$completed)),
+  `Per-participant M (SD)` = sprintf("%.1f%% (%.2f%%)", 100 * mean(by_person$rate), 100 * sd(by_person$rate)),
+  `Per-participant range` = sprintf("%.1f%%–%.1f%%", 100 * min(by_person$rate), 100 * max(by_person$rate))
+) %>% knitr::kable()
+```
+
+```{r ema-compliance-fig, fig.height = 3.2}
+bind_rows(
+  ema %>% group_by(x = (study_day - 1) %/% 7 + 1) %>% summarise(rate = mean(completed)) %>%
+    mutate(panel = "Study week"),
+  ema %>% group_by(x = ping) %>% summarise(rate = mean(completed)) %>%
+    mutate(panel = "Prompt within day")
+) %>%
+  ggplot(aes(x, rate)) +
+  geom_col(fill = "#3B6FA0", width = 0.7) +
+  facet_wrap(~ panel, scales = "free_x") +
+  scale_x_continuous(breaks = 1:6) +
+  scale_y_continuous(labels = scales::percent, limits = c(0, 1), expand = c(0, 0)) +
+  labs(x = NULL, y = "Prompts completed") +
+  theme_minimal(base_size = 11) +
+  theme(panel.grid.major.x = element_blank(), panel.grid.minor = element_blank())
+```
+
+## Predictors of a missed prompt
+
+Frequentist logistic mixed-effects models with a random intercept for
+participant. Lagged predictors come from the immediately preceding scheduled
+prompt (within participant) and are therefore only defined when that prompt was
+completed. Negative emotion is the mean of the five 0–100 items (sad, angry,
+afraid, ashamed, guilty), standardised.
+
+```{r ema-missingness}
+ema_m <- ema %>%
+  mutate(neg_emotion = rowMeans(across(c(anger, shame, sad, fear, guilt)))) %>%
+  arrange(ema_id, study_day, ping) %>%
+  group_by(ema_id) %>%
+  mutate(missed   = 1L - completed,
+         prior_na = lag(neg_emotion),
+         prior_si = lag(si_any)) %>%
+  ungroup() %>%
+  mutate(day_wk = (study_day - 1) / 7,                    # per study week
+         prior_na_z = as.numeric(scale(prior_na)))
+
+ctrl <- glmerControl(optimizer = "bobyqa")
+m_time <- glmer(missed ~ day_wk + ping + (1 | ema_id), data = ema_m, family = binomial, control = ctrl)
+m_na   <- glmer(missed ~ day_wk + ping + prior_na_z + (1 | ema_id), data = ema_m, family = binomial, control = ctrl)
+m_si   <- glmer(missed ~ day_wk + ping + prior_si + (1 | ema_id), data = ema_m, family = binomial, control = ctrl)
+
+tidy_glmer <- function(m, model) {
+  co <- coef(summary(m))
+  tibble(Model = model, Term = rownames(co), b = co[, 1], SE = co[, 2],
+         OR = exp(co[, 1]), p = co[, 4], `n prompts` = nobs(m))
+}
+bind_rows(tidy_glmer(m_time, "Time only"),
+          tidy_glmer(m_na, "+ prior negative emotion"),
+          tidy_glmer(m_si, "+ prior suicidal ideation")) %>%
+  filter(Term != "(Intercept)") %>%
+  mutate(Term = recode(Term, day_wk = "Study week", ping = "Prompt number within day",
+                       prior_na_z = "Negative emotion at prior prompt (z)",
+                       prior_si = "Suicidal/self-harm thoughts at prior prompt"),
+         across(c(b, SE, OR), ~ round(.x, 3)), p = format.pval(p, digits = 2, eps = 0.001)) %>%
+  knitr::kable()
+```
+
+# EMA safety summary
+
+```{r ema-safety}
+done <- ema %>% filter(completed == 1)
+n_done <- nrow(done)
+count_row <- function(label, flag) {
+  flag <- coalesce(flag, FALSE)
+  tibble(Event = label, Surveys = sum(flag),
+         `% of completed surveys` = sprintf("%.1f%%", 100 * sum(flag) / n_done),
+         Participants = n_distinct(done$ema_id[flag]))
+}
+bind_rows(
+  count_row("Thoughts of hurting or killing self since last prompt", done$si_any == 1),
+  count_row("Self-harm or suicide attempt in past 30 minutes", done$selfharm_30m == 1),
+  count_row("Any suicidal intent in past 30 minutes", done$intent_suicide_30m >= 1),
+  count_row("Current intent: none", done$intent_suicide_now == 0),
+  count_row("Current intent: a little (brief thoughts, no intent)", done$intent_suicide_now == 1),
+  count_row("Current intent: moderate (thoughts, no intent)", done$intent_suicide_now == 2),
+  count_row("Current intent: a lot / severe (planning or specific plan)", done$intent_suicide_now >= 3)
+) %>% knitr::kable()
+
+done %>% filter(intent_suicide_now == 2) %>% count(ema_id, sort = TRUE) %>%
+  summarise(`Surveys with moderate current intent` = sum(n),
+            `From the single highest-reporting participant` = max(n)) %>%
+  knitr::kable()
+```
+
+# Bayesian multilevel models (Table 4)
+
+Each outcome is modelled as `y ~ timepoint + (1 | id)` with a Gaussian
+likelihood: time is a categorical fixed effect (baseline as reference) and
+participants have random intercepts. Weakly informative priors are placed on
+the two change coefficients and on the between-person SD: Normal(0, 10) and
+Student-t(3, 0, 5) for every outcome except the CSES, whose 26–260 range calls
+for Normal(0, 50) and Student-t(3, 0, 20). The intercept and residual SD keep
+the `brms` defaults. Sampling: 4 chains × 3,000 iterations (1,000 warm-up) =
+8,000 posterior draws.
+
+```{r model-spec}
+model_spec <- tribble(
+  ~var,               ~prior_b,           ~prior_sd,
+  "cssrs",            "normal(0, 10)",    "student_t(3, 0, 5)",
+  "mssi",             "normal(0, 10)",    "student_t(3, 0, 5)",
+  "cerq_adaptive",    "normal(0, 10)",    "student_t(3, 0, 5)",
+  "cerq_maladaptive", "normal(0, 10)",    "student_t(3, 0, 5)",
+  "cses",             "normal(0, 50)",    "student_t(3, 0, 20)",
+  "promis_dep",       "normal(0, 10)",    "student_t(3, 0, 5)",
+  "promis_anx",       "normal(0, 10)",    "student_t(3, 0, 5)"
+) %>% left_join(outcomes, by = "var")
+
+model_spec %>% select(Outcome = label, `Prior: change coefficients` = prior_b,
+                      `Prior: between-person SD` = prior_sd) %>% knitr::kable()
+```
+
+```{r fit-models, results = "hide"}
+fit_outcome <- function(var, prior_b, prior_sd) {
+  d <- scores %>% select(id, timepoint, y = all_of(var)) %>% filter(!is.na(y))
+  brm(y ~ timepoint + (1 | id), data = d, family = gaussian(),
+      prior = c(set_prior(prior_b, class = "b"), set_prior(prior_sd, class = "sd")),
+      chains = 4, iter = 3000, warmup = 1000, seed = SEED,
+      control = list(adapt_delta = 0.95), refresh = 0,
+      file = file.path("fits", var), file_refit = "on_change")
+}
+fits <- Map(fit_outcome, model_spec$var, model_spec$prior_b, model_spec$prior_sd)
+```
+
+```{r summarise-models}
+summarise_fit <- function(fit, label, effect_size = FALSE) {
+  draws <- as_draws_df(fit)
+  y_sd  <- sd(fit$data$y)
+  rhat  <- rhat(fit)
+  pooled_sd <- sqrt(draws$sd_id__Intercept^2 + draws$sigma^2)
+  one <- function(par, timepoint, change) {
+    x <- draws[[par]]
+    out <- tibble(Outcome = label, Timepoint = timepoint,
+                  Estimate = median(x), lower = quantile(x, .025), upper = quantile(x, .975),
+                  pd = NA_real_, rope = NA_real_, Rhat = rhat[[par]], es = NA_character_)
+    if (change) {
+      out$pd   <- 100 * as.numeric(p_direction(x))
+      out$rope <- 100 * as.numeric(rope(x, range = c(-0.1, 0.1) * y_sd, ci = 1))
+      if (effect_size) {
+        d <- x / pooled_sd
+        out$es <- sprintf("%.2f [%.2f, %.2f]", median(d), quantile(d, .025), quantile(d, .975))
+      }
+    }
+    out
+  }
+  bind_rows(one("b_Intercept", "Intercept (Baseline)", FALSE),
+            one("b_timepointweek6", "6-week change", TRUE),
+            one("b_timepointweek12", "12-week change", TRUE))
+}
+
+table4 <- bind_rows(Map(summarise_fit, fits, model_spec$label,
+                        model_spec$var %in% c("cssrs", "mssi")))
+
+table4 %>%
+  transmute(Outcome, Timepoint,
+            Estimate = sprintf("%.2f", Estimate),
+            `95% CrI` = sprintf("[%.2f, %.2f]", lower, upper),
+            pd = ifelse(is.na(pd), "–", sprintf("%.2f%%", pd)),
+            `% in ROPE` = ifelse(is.na(rope), "–", sprintf("%.2f%%", rope)),
+            Rhat = sprintf("%.3f", Rhat),
+            `ES [95% CrI]` = coalesce(es, "")) %>%
+  knitr::kable(caption = "Table 4. Posterior estimates for change from baseline to 6- and 12-week follow-up. Estimate = posterior median; pd = probability of direction; ROPE = ±0.1 SD of the outcome; ES = change divided by the model-implied pooled SD, sqrt(between-person variance + residual variance).")
+```
+
+Convergence and sampling diagnostics across all parameters of each model:
+
+```{r diagnostics}
+bind_rows(lapply(names(fits), function(v) {
+  s <- posterior::summarise_draws(as_draws_df(fits[[v]]), "rhat", "ess_bulk", "ess_tail")
+  s <- s[!grepl("^(r_id|lp__|lprior)", s$variable), ]
+  tibble(Outcome = outcomes$label[outcomes$var == v], `n obs` = nobs(fits[[v]]),
+         `max Rhat` = round(max(s$rhat), 3), `min bulk ESS` = round(min(s$ess_bulk)),
+         `min tail ESS` = round(min(s$ess_tail)),
+         `divergent transitions` = sum(nuts_params(fits[[v]], pars = "divergent__")$Value))
+})) %>% knitr::kable()
+```
+
+# Figure 2. Model-estimated trajectories of suicidal ideation
+
+```{r figure2, fig.width = 7.5, fig.height = 3.6}
+estimated_means <- function(fit, label) {
+  d <- as_draws_df(fit)
+  m <- cbind(d$b_Intercept, d$b_Intercept + d$b_timepointweek6, d$b_Intercept + d$b_timepointweek12)
+  tibble(Outcome = label, timepoint = factor(tp_labels, levels = tp_labels),
+         mean = apply(m, 2, median), lower = apply(m, 2, quantile, .025),
+         upper = apply(m, 2, quantile, .975))
+}
+fig2 <- bind_rows(estimated_means(fits$cssrs, "CSSRS ideation severity (0–5)"),
+                  estimated_means(fits$mssi, "MSSI total (0–54)"))
+
+ggplot(fig2, aes(timepoint, mean, group = 1)) +
+  geom_line(colour = "#3B6FA0", linewidth = 0.8) +
+  geom_errorbar(aes(ymin = lower, ymax = upper), width = 0.08, colour = "#3B6FA0") +
+  geom_point(size = 2.6, colour = "#3B6FA0") +
+  facet_wrap(~ Outcome, scales = "free_y") +
+  expand_limits(y = 0) +
+  labs(x = NULL, y = "Model-estimated mean (95% CrI)") +
+  theme_minimal(base_size = 11) +
+  theme(panel.grid.minor = element_blank(), strip.text = element_text(face = "bold"))
+
+fig2 %>% mutate(across(c(mean, lower, upper), ~ round(.x, 2))) %>% knitr::kable()
+```
+
+# Table 5. Clinically meaningful response (≥50% reduction from baseline)
+
+A relative reduction is undefined for a baseline score of 0, so those
+participants are excluded from that measure's responder analysis.
+
+```{r table5}
+responders <- scores %>%
+  select(id, timepoint, CSSRS = cssrs, MSSI = mssi) %>%
+  pivot_longer(c(CSSRS, MSSI), names_to = "Measure", values_to = "y") %>%
+  group_by(id, Measure) %>%
+  mutate(baseline = y[timepoint == "baseline"]) %>%
+  ungroup() %>%
+  filter(timepoint != "baseline", !is.na(y), baseline > 0) %>%
+  group_by(Measure, timepoint) %>%
+  summarise(n = n(), k = sum(y <= 0.5 * baseline), .groups = "drop") %>%
+  mutate(responders = sprintf("%d (%.1f%%)", k, 100 * k / n)) %>%
+  select(-k) %>%
+  pivot_wider(names_from = timepoint, values_from = c(n, responders), names_vary = "slowest")
+
+responders %>%
+  rename(`n (6-week)` = n_week6, `≥50% responders, 6-week` = responders_week6,
+         `n (12-week)` = n_week12, `≥50% responders, 12-week` = responders_week12) %>%
+  knitr::kable(caption = "Table 5. Participants achieving a ≥50% reduction from baseline.")
+
+scores %>% filter(timepoint == "baseline") %>%
+  summarise(`Baseline MSSI = 0 (excluded from MSSI responder analysis)` = sum(mssi == 0)) %>%
+  knitr::kable()
+```
+
+# Session information
+
+```{r session}
+sessionInfo()
+```
