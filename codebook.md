@@ -64,24 +64,25 @@ README). Use for marginal summaries only.
 
 ## precise_ema.csv
 
-One row per scheduled EMA prompt: 30 participants × 42 study days × 5 prompts =
-6,300 rows. Survey variables are empty when `completed` = 0.
+One row per scheduled EMA prompt: 6,251 rows for 30 participants (built by
+`02_prepare_ema.R`). Survey variables are empty when `completed` = 0. Of the
+4,043 completed surveys, 69 were submitted without the emotion ratings.
 
 | Variable | Description | Values |
 |---|---|---|
 | `ema_id` | Random participant ID. Not linkable to `precise_visits.csv` | `E01`–`E30` |
-| `study_day` | Day of the six-week EMA protocol. For three participants whose prompt schedule was stopped and re-launched, numbering continues across the gap | 1–42 |
+| `study_day` | The participant's nth EMA day. For three participants whose prompt schedule was stopped and re-launched, numbering continues across the gap; one of them has a 43rd day | 1–43 |
 | `ping` | Prompt number within the day (1 = morning survey) | 1–5 |
-| `completed` | A completed survey was submitted for this prompt | 0, 1 |
+| `completed` | A survey was submitted for this prompt (4,043 of 6,251) | 0, 1 |
 | `anger`, `shame`, `sad`, `fear`, `guilt` | Momentary negative emotion sliders. The negative-emotion composite is their mean | 0–100 |
 | `si_any` | Gating item: thought about hurting or killing yourself since last night (prompt 1) / in the past few hours (prompts 2–5) | 0 = no, 1 = yes |
-| `intent_selfharm_30m` | Intention to harm self, past 30 minutes (asked if `si_any` = 1) | 0 = none, 1 = a little, 2 = moderate, 3 = a lot, 4 = severe (harmed self) |
+| `intent_selfharm_30m` | Intention to harm self, past 30 minutes (asked if `si_any` = 1; coded 0 when `si_any` = 0) | 0 = none, 1 = a little, 2 = moderate, 3 = a lot, 4 = severe (harmed self) |
 | `intent_suicide_30m` | Intention to kill self, past 30 minutes (asked if `intent_selfharm_30m` ≥ 1) | 0 = none, 1 = a little (brief thought, no intent), 2 = moderate (some thought, no intent), 3 = a lot (started planning), 4 = severe (specific plan) |
 | `intent_suicide_now` | Intention to kill self in this moment (asked if `intent_suicide_30m` ≥ 1) | 0–4, as above |
 | `selfharm_30m` | Attempted suicide or engaged in any self-harm in the past 30 minutes (asked if `si_any` = 1) | 0 = no, 1 = yes |
 
-When a participant opened the same prompt more than once, the completed
-submission (or, failing that, the most recent one) was kept.
+When the same prompt appears twice in the export (42 prompts, each a completed
+and an empty row from a re-sent prompt), the completed row was kept.
 
 ## promis_item_parameters.csv
 

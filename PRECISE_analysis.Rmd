@@ -27,9 +27,13 @@ the EMA compliance, missingness and safety summaries.
 |---|---|
 | Table 1 (demographics) | `precise_demographics.csv` |
 | Table 2 (acceptability, feasibility, usability) | `precise_implementation.csv` |
-| EMA compliance, missingness models, EMA safety counts | `precise_ema.csv` |
+| EMA compliance, missingness models, EMA safety counts, Figure S1 (Multimedia Appendix 1) | `precise_ema.csv` |
 | Table 4 and Figure 2 (Bayesian multilevel models) | `precise_visits.csv` |
 | Table 5 (≥50% responders) | `precise_visits.csv` |
+
+Figures 2 and S1 are drawn by `make_figure2.R` and `make_figureS1.R`, which this
+document runs; they write publication files (PDF, 600-dpi TIFF, PNG) to
+`figures/`.
 
 Figure 1 (CONSORT), Table 3 (session attendance), treatment fidelity and the
 adverse-event log are summarized from study tracking records and are not
@@ -258,9 +262,10 @@ round(cor(imp[-1]), 2) %>% knitr::kable(caption = "Pearson correlations among im
 
 # EMA compliance and missingness
 
-`precise_ema.csv` has one row per scheduled prompt: 30 participants × 42 days ×
-5 prompts. `completed` is 1 when a completed survey was submitted for that
-prompt.
+`precise_ema.csv` has one row per scheduled prompt (6,251 prompts across 30
+participants; built by `02_prepare_ema.R`). `completed` is 1 when a survey was
+submitted for that prompt. Study weeks are days 1–7, 8–14, …, 36–42; the one
+participant with a 43rd EMA day has it counted in week 6.
 
 ```{r ema-compliance}
 by_person <- ema %>% group_by(ema_id) %>% summarise(rate = mean(completed), .groups = "drop")
@@ -268,26 +273,34 @@ tibble(
   `Scheduled prompts` = nrow(ema),
   `Completed surveys` = sum(ema$completed),
   `Overall compliance` = sprintf("%.1f%%", 100 * mean(ema$completed)),
-  `Per-participant M (SD)` = sprintf("%.1f%% (%.2f%%)", 100 * mean(by_person$rate), 100 * sd(by_person$rate)),
+  `Per-participant M (SD)` = sprintf("%.1f%% (%.1f%%)", 100 * mean(by_person$rate), 100 * sd(by_person$rate)),
   `Per-participant range` = sprintf("%.1f%%–%.1f%%", 100 * min(by_person$rate), 100 * max(by_person$rate))
 ) %>% knitr::kable()
 ```
 
-```{r ema-compliance-fig, fig.height = 3.2}
-bind_rows(
-  ema %>% group_by(x = (study_day - 1) %/% 7 + 1) %>% summarise(rate = mean(completed)) %>%
-    mutate(panel = "Study week"),
-  ema %>% group_by(x = ping) %>% summarise(rate = mean(completed)) %>%
-    mutate(panel = "Prompt within day")
-) %>%
-  ggplot(aes(x, rate)) +
-  geom_col(fill = "#3B6FA0", width = 0.7) +
-  facet_wrap(~ panel, scales = "free_x") +
-  scale_x_continuous(breaks = 1:6) +
-  scale_y_continuous(labels = scales::percent, limits = c(0, 1), expand = c(0, 0)) +
-  labs(x = NULL, y = "Prompts completed") +
-  theme_minimal(base_size = 11) +
-  theme(panel.grid.major.x = element_blank(), panel.grid.minor = element_blank())
+Compliance by study week and by prompt of the day (pooled over prompts, as
+reported in the Results):
+
+```{r ema-compliance-week}
+ema %>% mutate(week = pmin(6, (study_day - 1) %/% 7 + 1)) %>%
+  group_by(`Study week` = week) %>%
+  summarise(`Scheduled` = n(), `Completed` = sum(completed),
+            `Compliance` = sprintf("%.1f%%", 100 * mean(completed))) %>%
+  knitr::kable()
+ema %>% group_by(`Prompt` = ping) %>%
+  summarise(`Scheduled` = n(), `Completed` = sum(completed),
+            `Compliance` = sprintf("%.1f%%", 100 * mean(completed))) %>%
+  knitr::kable()
+```
+
+### Figure S1 (Multimedia Appendix 1)
+
+```{r figureS1, results = "hide"}
+source("make_figureS1.R", local = new.env())
+```
+
+```{r figureS1-show, echo = FALSE, out.width = "100%"}
+knitr::include_graphics("figures/figureS1.png")
 ```
 
 ## Predictors of a missed prompt
@@ -318,7 +331,10 @@ m_si   <- glmer(missed ~ day_wk + ping + prior_si + (1 | ema_id), data = ema_m, 
 tidy_glmer <- function(m, model) {
   co <- coef(summary(m))
   tibble(Model = model, Term = rownames(co), b = co[, 1], SE = co[, 2],
-         OR = exp(co[, 1]), p = co[, 4], `n prompts` = nobs(m))
+         OR = exp(co[, 1]),
+         `OR 95% CI` = sprintf("[%.2f, %.2f]", exp(co[, 1] - 1.96 * co[, 2]),
+                               exp(co[, 1] + 1.96 * co[, 2])),
+         p = co[, 4], `n prompts` = nobs(m))
 }
 bind_rows(tidy_glmer(m_time, "Time only"),
           tidy_glmer(m_na, "+ prior negative emotion"),
@@ -343,7 +359,7 @@ count_row <- function(label, flag) {
          Participants = n_distinct(done$ema_id[flag]))
 }
 bind_rows(
-  count_row("Thoughts of hurting or killing self since last prompt", done$si_any == 1),
+  count_row("Thoughts of self-harm or suicide (gating item)", done$si_any == 1),
   count_row("Self-harm or suicide attempt in past 30 minutes", done$selfharm_30m == 1),
   count_row("Any suicidal intent in past 30 minutes", done$intent_suicide_30m >= 1),
   count_row("Current intent: none", done$intent_suicide_now == 0),
@@ -423,14 +439,14 @@ summarise_fit <- function(fit, label, effect_size = FALSE) {
             one("b_timepointweek12", "12-week change", TRUE))
 }
 
-table4 <- bind_rows(Map(summarise_fit, fits, model_spec$label,
-                        model_spec$var %in% c("cssrs", "mssi")))
+table4 <- bind_rows(Map(summarise_fit, fits, model_spec$label, TRUE))
 
 table4 %>%
   transmute(Outcome, Timepoint,
             Estimate = sprintf("%.2f", Estimate),
             `95% CrI` = sprintf("[%.2f, %.2f]", lower, upper),
-            pd = ifelse(is.na(pd), "–", sprintf("%.2f%%", pd)),
+            # 8,000 draws cannot show a pd of exactly 100%
+            pd = ifelse(is.na(pd), "–", ifelse(pd > 99.995, ">99.9%", sprintf("%.2f%%", pd))),
             `% in ROPE` = ifelse(is.na(rope), "–", sprintf("%.2f%%", rope)),
             Rhat = sprintf("%.3f", Rhat),
             `ES [95% CrI]` = coalesce(es, "")) %>%
@@ -452,28 +468,22 @@ bind_rows(lapply(names(fits), function(v) {
 
 # Figure 2. Model-estimated trajectories of suicidal ideation
 
-```{r figure2, fig.width = 7.5, fig.height = 3.6}
-estimated_means <- function(fit, label) {
-  d <- as_draws_df(fit)
-  m <- cbind(d$b_Intercept, d$b_Intercept + d$b_timepointweek6, d$b_Intercept + d$b_timepointweek12)
-  tibble(Outcome = label, timepoint = factor(tp_labels, levels = tp_labels),
-         mean = apply(m, 2, median), lower = apply(m, 2, quantile, .025),
-         upper = apply(m, 2, quantile, .975))
-}
-fig2 <- bind_rows(estimated_means(fits$cssrs, "CSSRS ideation severity (0–5)"),
-                  estimated_means(fits$mssi, "MSSI total (0–54)"))
+Points are posterior medians of the model-implied mean at each timepoint
+(intercept + change coefficient, computed draw by draw) and bars are 95%
+credible intervals from the same draws, so they match Table 4. Grey lines are
+participants' observed scores. `make_figure2.R` refits the CSSRS and MSSI models
+with the specification above and therefore loads them from `fits/`.
 
-ggplot(fig2, aes(timepoint, mean, group = 1)) +
-  geom_line(colour = "#3B6FA0", linewidth = 0.8) +
-  geom_errorbar(aes(ymin = lower, ymax = upper), width = 0.08, colour = "#3B6FA0") +
-  geom_point(size = 2.6, colour = "#3B6FA0") +
-  facet_wrap(~ Outcome, scales = "free_y") +
-  expand_limits(y = 0) +
-  labs(x = NULL, y = "Model-estimated mean (95% CrI)") +
-  theme_minimal(base_size = 11) +
-  theme(panel.grid.minor = element_blank(), strip.text = element_text(face = "bold"))
+```{r figure2, results = "hide"}
+source("make_figure2.R", local = new.env())
+```
 
-fig2 %>% mutate(across(c(mean, lower, upper), ~ round(.x, 2))) %>% knitr::kable()
+```{r figure2-show, echo = FALSE, out.width = "100%"}
+knitr::include_graphics("figures/figure2.png")
+```
+
+```{r figure2-values}
+readr::read_csv("figures/figure2_values.csv", show_col_types = FALSE) %>% knitr::kable()
 ```
 
 # Table 5. Clinically meaningful response (≥50% reduction from baseline)

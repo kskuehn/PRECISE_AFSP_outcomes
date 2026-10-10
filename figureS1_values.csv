@@ -1,0 +1,48 @@
+x,n,mean,se,panel
+1,30,90,2.5,A. By study day
+2,30,86,2.4,A. By study day
+3,30,92.7,2,A. By study day
+4,30,88,3.5,A. By study day
+5,30,82,4.1,A. By study day
+6,30,85.3,3.4,A. By study day
+7,30,78,4.3,A. By study day
+8,30,79.5,4.1,A. By study day
+9,30,72,5,A. By study day
+10,30,75.3,4,A. By study day
+11,30,72,5.1,A. By study day
+12,30,73.3,4.4,A. By study day
+13,30,75.3,3.8,A. By study day
+14,30,71.3,4,A. By study day
+15,30,68,5.7,A. By study day
+16,30,72.7,5,A. By study day
+17,30,66,5.8,A. By study day
+18,30,65.3,5.4,A. By study day
+19,30,67.2,5.9,A. By study day
+20,30,70.7,6,A. By study day
+21,30,65.3,5.7,A. By study day
+22,30,66,6.1,A. By study day
+23,30,56,6,A. By study day
+24,30,56.7,6.9,A. By study day
+25,30,55.3,6,A. By study day
+26,30,62,5.8,A. By study day
+27,30,62.7,6.3,A. By study day
+28,30,52,6,A. By study day
+29,30,58.5,5.9,A. By study day
+30,30,54,6.3,A. By study day
+31,30,47.3,7.3,A. By study day
+32,30,58.7,6,A. By study day
+33,30,56.7,6.8,A. By study day
+34,30,54,6.8,A. By study day
+35,30,54,6.2,A. By study day
+36,30,56,6.3,A. By study day
+37,30,50.7,6,A. By study day
+38,30,43.3,7.1,A. By study day
+39,30,46,6.3,A. By study day
+40,30,51.3,7,A. By study day
+41,29,42.8,6.4,A. By study day
+42,29,43.4,6.6,A. By study day
+1,30,58,4.3,B. By prompt of the day
+2,30,65.5,4.4,B. By prompt of the day
+3,30,66.9,4.4,B. By prompt of the day
+4,30,67.5,4.2,B. By prompt of the day
+5,30,66,4,B. By prompt of the day

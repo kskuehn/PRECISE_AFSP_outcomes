@@ -3,12 +3,11 @@
 # =============================================================================
 # Input  (NOT in the repository; contain PHI -- see .gitignore):
 #   data-raw/AIM2PRECISEInPersonC_DATA_LABELS_<date>.csv  visit-based assessments
-#   data-raw/AIM2PRECISEEMA_DATA_LABELS_<date>.csv        ecological momentary assessment
 # Output (public):
 #   data/precise_visits.csv          30 participants x 3 visits, item-level + scale scores
 #   data/precise_implementation.csv  post-treatment AIM / IAM / FIM / SUS (n = 28)
 #   data/precise_demographics.csv    Table 1 variables, NOT linkable to any other file
-#   data/precise_ema.csv             30 participants x 42 days x 5 prompts
+#   (data/precise_ema.csv is built separately by 02_prepare_ema.R)
 #
 # De-identification applied here
 #   * all free text, names, phone numbers, dates of birth, visit dates, time
@@ -20,7 +19,7 @@
 #     no row describes a real person). Set PERMUTE_DEMOGRAPHICS <- FALSE to keep
 #     real rows (still unlinked and row-shuffled).
 #
-# Run from the repository root:  Rscript R/01_clean_data.R
+# Run from the repository root:  Rscript 01_clean_data.R
 # =============================================================================
 
 suppressPackageStartupMessages({
@@ -211,107 +210,8 @@ demographics <- if (PERMUTE_DEMOGRAPHICS) {
 # =============================================================================
 # 2. Ecological momentary assessment
 # =============================================================================
-e <- read_labels(latest("EMA_DATA_LABELS"))
-lab_e <- attr(e, "labels")
-pick2 <- function(label, nth_am = 1, nth_pm = 2) {
-  # each item exists twice: once in the morning survey (prompt 1) and once in
-  # the daytime survey (prompts 2-5)
-  coalesce(e[[col_at(e, label, nth = nth_am, exact = TRUE)]],
-           e[[col_at(e, label, nth = nth_pm, exact = TRUE)]])
-}
-# The 0-100 negative-emotion sliders are five adjacent columns (Anger, Shame,
-# Sad, Fear, Guilt), starting at the 1st "Anger" column in the morning survey
-# and the 3rd in the daytime survey (the 2nd / 4th are yes/no follow-ups).
-emo_names <- c("Anger", "Shame", "Sad", "Fear", "Guilt")
-emo_am <- col_at(e, "Anger", 5, nth = 1, exact = TRUE)
-emo_pm <- col_at(e, "Anger", 5, nth = 3, exact = TRUE)
-stopifnot(identical(lab_e[match(emo_am, names(e))], emo_names),
-          identical(lab_e[match(emo_pm, names(e))], emo_names))
-slider <- function(label) {
-  k <- match(label, emo_names)
-  as.numeric(coalesce(e[[emo_am[k]]], e[[emo_pm[k]]]))
-}
-sev <- c("None" = 0L, "A little" = 1L, "Moderate" = 2L, "A lot" = 3L, "Severe" = 4L)
-sev_code <- function(x) unname(sev[sub(" - .*$", "", x)])
-intent_harm <- "Within the past 30 minutes, what has been your intention to harm yourself?"
-intent_kill <- "Within the past 30 minutes, how strong has your intention been to kill yourself?"
-intent_now  <- "What is your intention to kill yourself in this moment?"
-any_sh <- which(startsWith(lab_e, "Have you attempted suicide or engaged in any self-harm in the past 30 minutes"))
-si_am  <- col_at(e, "Have you thought about hurting or killing yourself since last night?")
-si_pm  <- col_at(e, "Have you thought about hurting or killing yourself in the past few hours?")
-
-ema_raw <- tibble(
-  redcap_row   = seq_len(nrow(e)),
-  inclivio_id  = e[[col_at(e, "Participant's ID from inclivio")]],
-  inclivio_day = as.integer(e[[col_at(e, "Day number from inclivio")]]),
-  ping         = as.integer(e[[col_at(e, "Ping Number from inclivio")]]),
-  sent_gmt     = as.POSIXct(e[[col_at(e, "Response time stamp from inclivio")]],
-                            format = "%a, %d %b %Y %H:%M:%S", tz = "GMT"),
-  complete     = e[[col_at(e, "Complete?")]] == "Complete",
-  anger = slider("Anger"), shame = slider("Shame"), sad = slider("Sad"),
-  fear  = slider("Fear"),  guilt = slider("Guilt"),
-  si_any             = coalesce(e[[si_am]], e[[si_pm]]),
-  intent_selfharm_30m = sev_code(pick2(intent_harm)),
-  intent_suicide_30m  = sev_code(pick2(intent_kill)),
-  intent_suicide_now  = sev_code(pick2(intent_now)),
-  selfharm_30m       = coalesce(e[[names(e)[any_sh[1]]]], e[[names(e)[any_sh[2]]]])
-) %>%
-  # 99 test / unlinked records have no Inclivio participant ID
-  filter(!is.na(inclivio_id)) %>%
-  mutate(local_date = as.Date(format(sent_gmt, tz = "America/Los_Angeles")),
-         si_any = as.integer(si_any == "Yes"),
-         selfharm_30m = as.integer(selfharm_30m == "Yes"))
-
-# ---- Study day ----------------------------------------------------------------
-# Inclivio restarted its day counter at 1 for three participants whose prompt
-# schedule was stopped and re-launched. A new "run" starts whenever the gap
-# between calendar day and Inclivio day jumps by more than one day. Study day
-# continues from the last study day of the previous run, so days on which no
-# prompts were scheduled are not counted; a run re-launched on the same
-# calendar date as the previous run ended continues that same study day.
-ema_raw <- ema_raw %>%
-  group_by(inclivio_id) %>%
-  mutate(offset = as.integer(local_date - min(local_date)) + 1L - inclivio_day) %>%
-  arrange(sent_gmt, .by_group = TRUE) %>%
-  mutate(run = cumsum(c(0L, diff(offset) > 1L)) + 1L) %>%
-  ungroup()
-
-run_shift <- ema_raw %>%
-  group_by(inclivio_id, run) %>%
-  summarise(first_date = min(local_date), last_date = max(local_date),
-            n_days = max(inclivio_day), .groups = "drop_last") %>%
-  arrange(run, .by_group = TRUE) %>%
-  mutate(same_day_restart = coalesce(first_date == lag(last_date), FALSE),
-         # days contributed by each run, net of a study day shared with the previous run
-         shift = lag(cumsum(n_days - same_day_restart), default = 0L) - same_day_restart) %>%
-  ungroup() %>%
-  select(inclivio_id, run, shift)
-
-ema_raw <- ema_raw %>%
-  left_join(run_shift, by = c("inclivio_id", "run")) %>%
-  mutate(study_day = inclivio_day + as.integer(shift))
-
-# ---- One record per prompt ------------------------------------------------------
-# Re-opened survey links create several records for the same prompt; keep the
-# completed one (else the most recent).
-ema_obs <- ema_raw %>%
-  arrange(inclivio_id, study_day, ping, desc(complete), desc(redcap_row)) %>%
-  distinct(inclivio_id, study_day, ping, .keep_all = TRUE) %>%
-  filter(study_day <= 42)
-
-ema_ids <- tibble(inclivio_id = unique(ema_obs$inclivio_id)) %>%
-  mutate(ema_id = sprintf("E%02d", sample(n())))
-stopifnot(nrow(ema_ids) == 30)
-
-ema <- ema_ids %>%
-  crossing(study_day = 1:42, ping = 1:5) %>%               # protocol: 42 days x 5 prompts
-  left_join(ema_obs, by = c("inclivio_id", "study_day", "ping")) %>%
-  transmute(ema_id, study_day, ping,
-            completed = as.integer(coalesce(complete, FALSE)),
-            across(c(anger, shame, sad, fear, guilt, si_any, intent_selfharm_30m,
-                     intent_suicide_30m, intent_suicide_now, selfharm_30m),
-                   ~ if_else(completed == 1L, .x, NA))) %>%
-  arrange(ema_id, study_day, ping)
+# The public EMA file is built by 02_prepare_ema.R, which uses the definitions
+# reported in the manuscript (see the header of that script).
 
 # =============================================================================
 # 3. Write
@@ -319,8 +219,6 @@ ema <- ema_ids %>%
 write_csv(visits,         file.path(out_dir, "precise_visits.csv"), na = "")
 write_csv(implementation, file.path(out_dir, "precise_implementation.csv"), na = "")
 write_csv(demographics,   file.path(out_dir, "precise_demographics.csv"), na = "")
-write_csv(ema,            file.path(out_dir, "precise_ema.csv"), na = "")
 
 message("visits: ", nrow(visits), " rows | implementation: ", nrow(implementation),
-        " | demographics: ", nrow(demographics), " | ema: ", nrow(ema),
-        " prompts, ", sum(ema$completed), " completed")
+        " | demographics: ", nrow(demographics))

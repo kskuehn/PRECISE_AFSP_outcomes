@@ -1,0 +1,7 @@
+Outcome,Timepoint,n,Mean,95% CrI lower,95% CrI upper
+cssrs,Baseline,30,3.23,2.8,3.64
+cssrs,6-Week,28,1.69,1.25,2.11
+cssrs,12-Week,26,0.95,0.49,1.4
+mssi,Baseline,30,7.87,5.32,10.32
+mssi,6-Week,28,1.44,-1.14,4.05
+mssi,12-Week,26,2.48,-0.24,5.1
