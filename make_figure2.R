@@ -158,4 +158,9 @@ p <- p +
 ggsave("figures/figure2.pdf",  p, width = 7.5, height = 4.6, device = cairo_pdf)
 ggsave("figures/figure2.tiff", p, width = 7.5, height = 4.6, dpi = 600, compression = "lzw")
 ggsave("figures/figure2.png",  p, width = 7.5, height = 4.6, dpi = 300)
-message("Saved figures/figure2.{pdf,tiff,png}")
+# JMIR upload version: max 1200 x 1200 px, and no title or notes inside the
+# image (JMIR requires them in the caption). 6 x 3.7 in at 200 dpi = 1200 x 740.
+p_jmir <- p + labs(title = NULL, caption = NULL) +
+  theme(plot.margin = margin(6, 10, 6, 6))
+ggsave("figures/figure2_jmir.png", p_jmir, width = 6, height = 3.7, dpi = 200)
+message("Saved figures/figure2.{pdf,tiff,png} and figures/figure2_jmir.png")
