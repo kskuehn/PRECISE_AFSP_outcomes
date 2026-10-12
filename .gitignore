@@ -1,0 +1,7 @@
+data-raw/
+fits/
+.Rhistory
+.RData
+.Rproj.user/
+PRECISE_analysis_files/
+PRECISE_analysis_cache/
